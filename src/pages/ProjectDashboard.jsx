@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Search, Database, Users, Calendar, Award, FileText, BarChart2 } from 'lucide-react';
+import ExportWidget from '../components/ExportWidget';
 import api from '../lib/api';
 
 export default function ProjectDashboard() {
@@ -88,15 +89,36 @@ export default function ProjectDashboard() {
                             <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/10 rounded-full blur-3xl -mr-32 -mt-32"></div>
 
                             <div className="relative z-10">
-                                <div className="flex items-center gap-3 mb-2 text-emerald-400 font-mono text-sm">
-                                    <Database className="w-4 h-4" />
-                                    <span>{selectedProject.type || 'Research Project'}</span>
-                                    {selectedProject['PÉRIODE'] && (
-                                        <>
-                                            <span className="text-slate-600">•</span>
-                                            <span className="text-slate-400">{selectedProject['PÉRIODE']}</span>
-                                        </>
-                                    )}
+                                <div className="flex justify-between items-start">
+                                    <div className="flex items-center gap-3 mb-2 text-emerald-400 font-mono text-sm">
+                                        <Database className="w-4 h-4" />
+                                        <span>{selectedProject.type || 'Research Project'}</span>
+                                        {selectedProject['PÉRIODE'] && (
+                                            <>
+                                                <span className="text-slate-600">•</span>
+                                                <span className="text-slate-400">{selectedProject['PÉRIODE']}</span>
+                                            </>
+                                        )}
+                                    </div>
+                                    <ExportWidget
+                                        data={{ project: selectedProject, stats }}
+                                        jsonFilename={`${selectedProject.NOM}_report`}
+                                        forceDark={true}
+                                        csvOptions={[
+                                            {
+                                                label: "Detected Publications",
+                                                data: stats?.hal?.recent_publications,
+                                                filename: `${selectedProject.NOM}_publications`,
+                                                description: "List of found papers"
+                                            },
+                                            {
+                                                label: "Contributors",
+                                                data: stats?.hal?.top_authors ? Object.entries(stats.hal.top_authors).map(([name, count]) => ({ name, count })) : [],
+                                                filename: `${selectedProject.NOM}_contributors`,
+                                                description: "Top authors"
+                                            }
+                                        ]}
+                                    />
                                 </div>
                                 <h1 className="text-5xl font-bold text-white tracking-tight mb-4">
                                     {selectedProject.NOM}

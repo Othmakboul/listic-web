@@ -46,9 +46,51 @@ export default function NetworkGraph() {
         });
     };
 
+    // Helper to remove a node and all its descendants
+    const removeNodeAndDescendants = (nodeId) => {
+        setGraphData(prev => {
+            // Find all descendants using BFS
+            const toRemove = new Set([nodeId]);
+            let changed = true;
+            while (changed) {
+                changed = false;
+                prev.links.forEach(link => {
+                    const sourceId = link.source.id || link.source;
+                    const targetId = link.target.id || link.target;
+                    if (toRemove.has(sourceId) && !toRemove.has(targetId)) {
+                        toRemove.add(targetId);
+                        changed = true;
+                    }
+                });
+            }
+            // Don't remove the clicked node itself, only its children
+            toRemove.delete(nodeId);
+
+            return {
+                nodes: prev.nodes.filter(n => !toRemove.has(n.id)),
+                links: prev.links.filter(l => {
+                    const sourceId = l.source.id || l.source;
+                    const targetId = l.target.id || l.target;
+                    return !toRemove.has(sourceId) && !toRemove.has(targetId);
+                })
+            };
+        });
+
+        // Remove all descendants from expandedNodes set as well
+        setExpandedNodes(prev => {
+            const newSet = new Set(prev);
+            // We need to find all children that were removed.
+            // For simplicity, just remove the node itself from expanded.
+            newSet.delete(nodeId);
+            return newSet;
+        });
+    };
+
     const handleNodeClick = useCallback(async (node) => {
+        // Toggle: If already expanded, collapse (remove children)
         if (expandedNodes.has(node.id)) {
-            setInfo(`Already exploring ${node.name}...`);
+            removeNodeAndDescendants(node.id);
+            setInfo(`Collapsed ${node.name}.`);
             return;
         }
 
@@ -230,18 +272,57 @@ export default function NetworkGraph() {
             }
 
             const pubs = stats.recent_publications || [];
-            const newNodes = pubs.slice(0, 5).map((pub, idx) => ({
-                id: `pub-${parentId}-${idx}`,
-                name: pub.title?.substring(0, 30) + '...',
-                fullTitle: pub.title,
-                val: 4,
-                color: '#fcd34d',
-                type: 'item_project'
-            }));
+            const newNodes = pubs.slice(0, 5).map((pub, idx) => {
+                // HAL uses title_s (can be string or array), DBLP might use title
+                let rawTitle = pub.title_s || pub.title || 'Untitled Publication';
+                if (Array.isArray(rawTitle)) rawTitle = rawTitle[0];
+                const displayTitle = rawTitle.length > 35 ? rawTitle.substring(0, 35) + '...' : rawTitle;
+
+                // Store authors for later expansion
+                let authors = pub.authFullName_s || [];
+                if (!Array.isArray(authors)) authors = [authors];
+
+                return {
+                    id: `pub-${parentId}-${idx}`,
+                    name: displayTitle,
+                    fullTitle: rawTitle,
+                    authors: authors,
+                    val: 4,
+                    color: '#fcd34d',
+                    type: 'item_project'
+                };
+            });
 
             const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
             addNodesAndLinks(id, newNodes, newLinks);
-            setInfo("Expanded Projects.");
+            setInfo(`Showing ${pubs.length} recent publications.`);
+            return;
+        }
+
+        // 6.5 Publication Expansion -> Show all co-authors
+        if (type === 'item_project') {
+            const authors = node.authors || [];
+
+            if (authors.length === 0) {
+                setInfo("No authors found for this publication.");
+                return;
+            }
+
+            const newNodes = authors.map((authorName, idx) => {
+                const authorId = `author-${node.id}-${authorName.replace(/\s+/g, '_')}`;
+                return {
+                    id: authorId,
+                    name: authorName,
+                    collabName: authorName,
+                    val: 4,
+                    color: '#f9a8d4',
+                    type: 'item_collab'
+                };
+            });
+
+            const newLinks = newNodes.map(n => ({ source: node.id, target: n.id }));
+            addNodesAndLinks(node.id, newNodes, newLinks);
+            setInfo(`Showing ${authors.length} authors.`);
             return;
         }
 
@@ -263,13 +344,18 @@ export default function NetworkGraph() {
             }
 
             const collabs = Object.entries(stats.top_collaborators).slice(0, 10);
-            const newNodes = collabs.map(([name, count], idx) => ({
-                id: `collab-${parentId}-${idx}`,
-                name: name,
-                val: 4,
-                color: '#f9a8d4',
-                type: 'item_collab'
-            }));
+            const newNodes = collabs.map(([collabName, count], idx) => {
+                // Use a unique ID based on the collaborator's name (hashed or sanitized)
+                const collabId = `collab-${parentId}-${collabName.replace(/\s+/g, '_')}`;
+                return {
+                    id: collabId,
+                    name: collabName,
+                    collabName: collabName, // Store original name for HAL lookup
+                    val: 4,
+                    color: '#f9a8d4',
+                    type: 'item_collab'
+                };
+            });
 
             const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
             addNodesAndLinks(id, newNodes, newLinks);
@@ -277,21 +363,101 @@ export default function NetworkGraph() {
             return;
         }
 
+        // 8. Collaborator Node Expansion -> Treat like a researcher (recursive)
+        if (type === 'item_collab') {
+            const collabName = node.collabName || node.name;
+            setInfo(`Loading data for ${collabName}...`);
+            setLoading(true);
+
+            try {
+                // Fetch HAL stats directly by name using the global stats endpoint with author filter
+                // Or we can directly query HAL. For simplicity, let's use a direct HAL search.
+                const halUrl = `https://api.archives-ouvertes.fr/search/?q=authFullName_t:"${encodeURIComponent(collabName)}"&wt=json&fl=title_s,producedDateY_i,docType_s,keyword_s,authFullName_s,journalTitle_s&rows=50&sort=producedDateY_i%20desc`;
+
+                const response = await fetch(halUrl);
+                const data = await response.json();
+                const docs = data.response?.docs || [];
+
+                if (docs.length === 0) {
+                    setInfo(`No publications found for ${collabName}.`);
+                    setLoading(false);
+                    return;
+                }
+
+                // Process stats like in backend
+                const keywords = [];
+                const coAuthors = [];
+                const collabNameLower = collabName.toLowerCase();
+
+                docs.forEach(d => {
+                    if (d.keyword_s) {
+                        if (Array.isArray(d.keyword_s)) keywords.push(...d.keyword_s);
+                        else keywords.push(d.keyword_s);
+                    }
+                    if (d.authFullName_s) {
+                        const authors = Array.isArray(d.authFullName_s) ? d.authFullName_s : [d.authFullName_s];
+                        authors.forEach(auth => {
+                            if (auth.toLowerCase() !== collabNameLower) {
+                                coAuthors.push(auth);
+                            }
+                        });
+                    }
+                });
+
+                // Count collaborators
+                const collabCounts = {};
+                coAuthors.forEach(name => {
+                    collabCounts[name] = (collabCounts[name] || 0) + 1;
+                });
+                const topCollaborators = Object.entries(collabCounts)
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 10)
+                    .reduce((acc, [k, v]) => { acc[k] = v; return acc; }, {});
+
+                // Store in cache
+                const cacheKey = `details-${node.id}`;
+                setResearcherCache(prev => ({
+                    ...prev,
+                    [cacheKey]: {
+                        stats: {
+                            hal: {
+                                found: true,
+                                recent_publications: docs.slice(0, 5),
+                                top_collaborators: topCollaborators
+                            }
+                        }
+                    }
+                }));
+
+                // Add sub-nodes (Projets & Collaborateurs)
+                const newNodes = [
+                    { id: `p-proj-${node.id}`, name: 'Publications', val: 6, color: '#f59e0b', type: 'researcher_projects', parentId: node.id },
+                    { id: `p-collab-${node.id}`, name: 'Collaborateurs', val: 6, color: '#ec4899', type: 'researcher_collabs', parentId: node.id }
+                ];
+                const newLinks = newNodes.map(n => ({ source: node.id, target: n.id }));
+                addNodesAndLinks(node.id, newNodes, newLinks);
+
+                setInfo(`Loaded ${docs.length} publications for ${collabName}.`);
+            } catch (e) {
+                console.error(e);
+                setInfo(`Error loading data for ${collabName}.`);
+            } finally {
+                setLoading(false);
+            }
+            return;
+        }
+
     }, [expandedNodes, researcherCache]);
 
     return (
         <div className="h-[calc(100vh-100px)] relative overflow-hidden bg-slate-900 mx-4 rounded-3xl shadow-2xl border border-slate-800">
-            <div className="absolute top-4 left-4 z-10 glass-card-dark p-4 max-w-sm pointer-events-none select-none">
-                <div className="pointer-events-auto">
-                    <h2 className="text-xl font-bold text-white mb-2 flex items-center gap-2">
-                        <Search className="w-5 h-5 text-blue-400" /> Research Network
-                    </h2>
-                    <p className="text-slate-300 text-sm mb-2">
-                        Interactive hierarchy: LISTIC &rarr; Groups &rarr; Details.
-                    </p>
-                    <div className="text-xs text-blue-300 font-mono bg-slate-800 p-2 rounded border border-slate-700">
-                        &gt; {info}
-                    </div>
+            {/* Info Panel */}
+            <div className="absolute top-4 left-4 z-10 glass-card-dark p-3 max-w-xs pointer-events-none select-none">
+                <p className="text-slate-300 text-xs mb-2">
+                    Click to expand, click again to collapse.
+                </p>
+                <div className="text-xs text-blue-300 font-mono bg-slate-800 p-2 rounded border border-slate-700">
+                    &gt; {info}
                 </div>
             </div>
 

@@ -13,6 +13,7 @@ export default function Navbar({ theme, toggleTheme }) {
                     <Link to="/" className="hover:text-emerald-500 dark:hover:text-emerald-400 transition">Researchers</Link>
                     <Link to="/projects" className="hover:text-emerald-500 dark:hover:text-emerald-400 transition">Projects</Link>
                     <Link to="/network" className="hover:text-emerald-500 dark:hover:text-emerald-400 transition">Network Map</Link>
+                    <Link to="/global-stats" className="hover:text-emerald-500 dark:hover:text-emerald-400 transition">Global Stats</Link>
 
                     <button
                         onClick={toggleTheme}

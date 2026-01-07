@@ -4,6 +4,7 @@ import api from '../lib/api';
 import { ArrowLeft, BookOpen, Layers, Award, ExternalLink, Calendar } from 'lucide-react';
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Legend, PieChart, Pie, Cell } from 'recharts';
 import { motion } from 'framer-motion';
+import ExportWidget from '../components/ExportWidget';
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'];
 
@@ -13,7 +14,41 @@ export default function Dashboard() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
 
+    // Filters State
+    const [startYear, setStartYear] = useState('');
+    const [endYear, setEndYear] = useState('');
+    const [selectedKeyword, setSelectedKeyword] = useState('');
+
+    const fetchData = () => {
+        setLoading(true);
+        api.get(`/researcher/${id}`, {
+            params: {
+                start_year: startYear || undefined,
+                end_year: endYear || undefined,
+                keyword: selectedKeyword || undefined
+            }
+        })
+            .then(res => {
+                setData(res.data);
+                setLoading(false);
+            })
+            .catch(err => {
+                console.error(err);
+                setError("Failed to load researcher data.");
+                setLoading(false);
+            });
+    };
+
+    // Initial Load & ID Change
     useEffect(() => {
+        // Reset filters on new researcher
+        setStartYear('');
+        setEndYear('');
+        setSelectedKeyword('');
+        setAllKeywords([]);
+
+        // Fetch specific data for new ID (without filters initially)
+        setLoading(true);
         api.get(`/researcher/${id}`)
             .then(res => {
                 setData(res.data);
@@ -26,7 +61,51 @@ export default function Dashboard() {
             });
     }, [id]);
 
-    if (loading) return (
+    // Keep track of initial keywords for the dropdown so it doesn't disappear on filter
+    const [allKeywords, setAllKeywords] = useState([]);
+
+    useEffect(() => {
+        if (data && data.stats && data.stats.hal && allKeywords.length === 0) {
+            const keys = Object.keys(data.stats.hal.top_keywords || {});
+            if (keys.length > 0) setAllKeywords(keys);
+        }
+    }, [data, allKeywords.length]);
+
+    const handleKeywordChange = (e) => {
+        setSelectedKeyword(e.target.value);
+    };
+
+    const handleYearStartChange = (e) => {
+        const val = e.target.value;
+        setStartYear(val ? parseInt(val) : '');
+    };
+
+    const handleYearEndChange = (e) => {
+        const val = e.target.value;
+        setEndYear(val ? parseInt(val) : '');
+    };
+
+    const handleApplyFilters = () => {
+        fetchData();
+    };
+
+    const handleClearFilters = () => {
+        setStartYear('');
+        setEndYear('');
+        setSelectedKeyword('');
+        // Trigger fetch with empty params immediately
+        setLoading(true);
+        api.get(`/researcher/${id}`)
+            .then(res => {
+                setData(res.data);
+                setLoading(false);
+            })
+            .catch(err => {
+                setLoading(false);
+            });
+    };
+
+    if (loading && !data) return (
         <div className="min-h-screen flex items-center justify-center bg-slate-50">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600"></div>
         </div>
@@ -38,21 +117,13 @@ export default function Dashboard() {
     const hal = stats.hal;
     const dblp = stats.dblp;
 
-    // Prepare Chart Data
-    const yearsMap = {};
-
-    // Merge years from HAL and DBLP (taking max to avoid double counting if duplicate, or sum if different sources. 
-    // Comparing is hard, let's prioritize HAL for "Complete" years if available, or merge.)
-    // Strategy: Use HAL as base, fallback to DBLP if HAL empty.
-    // Actually, let's show HAL stats primarily if available as it's often richer for French labs.
-
+    // --- Data Processing Restore ---
     const sourceStats = hal.found ? hal : dblp;
 
     const yearData = Object.entries(sourceStats.years_distribution || {})
         .map(([year, count]) => ({ year, count }))
         .sort((a, b) => a.year - b.year);
 
-    // Doc Type Mapping - Full Descriptive Names
     const DOC_TYPE_MAPPING = {
         'ART': 'Journal Article',
         'COMM': 'Conference Paper',
@@ -83,13 +154,24 @@ export default function Dashboard() {
         'TRAD': 'Translation'
     };
 
-    const typeData = Object.entries(sourceStats.types_distribution || {})
+    const allTypeData = Object.entries(sourceStats.types_distribution || {})
         .map(([name, value]) => ({
-            name: DOC_TYPE_MAPPING[name] || name, // Use mapped name or original code
+            name: DOC_TYPE_MAPPING[name] || name,
             value
-        }));
+        }))
+        .sort((a, b) => b.value - a.value);
+
+    // Filter to Top 4 + Others
+    const top4 = allTypeData.slice(0, 4);
+    const rest = allTypeData.slice(4);
+    const othersCount = rest.reduce((acc, curr) => acc + curr.value, 0);
+
+    const typeData = othersCount > 0
+        ? [...top4, { name: 'Others', value: othersCount }]
+        : top4;
 
     const totalPubs = sourceStats.total_publications || 0;
+    // -------------------------------
 
     return (
         <div className="max-w-7xl mx-auto px-6 pb-20">
@@ -103,6 +185,7 @@ export default function Dashboard() {
                 animate={{ opacity: 1, y: 0 }}
                 className="glass-card p-8 mb-8 flex flex-col md:flex-row items-center md:items-start gap-8 bg-white"
             >
+                {/* ... existing header content ... */}
                 <div className="w-24 h-24 rounded-full bg-gradient-to-br from-blue-500 to-emerald-500 flex items-center justify-center text-white text-3xl font-bold shadow-lg">
                     {profile.name.charAt(0)}
                 </div>
@@ -112,25 +195,89 @@ export default function Dashboard() {
                         {profile.category && <span className="bg-blue-50 text-blue-600 px-3 py-1 rounded-full text-sm font-medium">{profile.category.replace('_', ' ')}</span>}
                         {profile.office && <span className="flex items-center gap-1"><Layers className="w-4 h-4" /> {profile.office}</span>}
                     </div>
-                    {profile.url_listic && (
-                        <a href={profile.url_listic} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline flex items-center justify-center md:justify-start gap-1">
-                            View Lab Profile <ExternalLink className="w-3 h-3" />
-                        </a>
-                    )}
-                </div>
-
-                {/* Key Stats Cards */}
-                <div className="flex gap-4">
-                    <div className="text-center p-4 bg-slate-50 rounded-xl border border-slate-100 min-w-[120px]">
-                        <div className="text-3xl font-bold text-blue-600">{totalPubs}</div>
-                        <div className="text-xs text-slate-400 uppercase tracking-widest font-semibold">Publications</div>
-                    </div>
-                    <div className="text-center p-4 bg-slate-50 rounded-xl border border-slate-100 min-w-[120px]">
-                        <div className="text-3xl font-bold text-emerald-600">{yearData.length > 0 ? Math.max(...yearData.map(y => y.count)) : 0}</div>
-                        <div className="text-xs text-slate-400 uppercase tracking-widest font-semibold">Peak Year</div>
-                    </div>
                 </div>
             </motion.div>
+
+            {/* Filters Section */}
+            <div className="bg-white p-6 rounded-xl shadow-sm mb-8 border border-gray-100 flex flex-wrap gap-6 items-end justify-between">
+                <div className="flex flex-wrap gap-6 items-end">
+                    <div className="flex flex-col gap-1">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">From Year</label>
+                        <input
+                            type="number"
+                            placeholder="e.g. 2015"
+                            value={startYear}
+                            onChange={handleYearStartChange}
+                            className="border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-32"
+                        />
+                    </div>
+                    <div className="flex flex-col gap-1">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">To Year</label>
+                        <input
+                            type="number"
+                            placeholder="e.g. 2025"
+                            value={endYear}
+                            onChange={handleYearEndChange}
+                            className="border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 w-32"
+                        />
+                    </div>
+                    <div className="flex flex-col gap-1 min-w-[200px]">
+                        <label className="text-xs font-bold text-slate-500 uppercase tracking-wide">Filter by Topic</label>
+                        <select
+                            value={selectedKeyword}
+                            onChange={handleKeywordChange}
+                            className="border border-gray-200 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+                        >
+                            <option value="">All Topics</option>
+                            {allKeywords.map((kw, i) => (
+                                <option key={i} value={kw}>{kw}</option>
+                            ))}
+                        </select>
+                    </div>
+
+                    {/* Action Buttons */}
+                    <div className="flex gap-4">
+                        <button
+                            onClick={handleApplyFilters}
+                            className="bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 px-4 rounded-md shadow-sm transition"
+                        >
+                            Apply Filters
+                        </button>
+
+                        {(startYear || endYear || selectedKeyword) && (
+                            <button
+                                onClick={handleClearFilters}
+                                className="bg-gray-100 hover:bg-gray-200 text-gray-600 font-semibold py-2 px-4 rounded-md transition"
+                            >
+                                Clear
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                <ExportWidget
+                    data={data}
+                    jsonFilename={`${profile.name.replace(/\s+/g, '_')}_stats`}
+                    csvOptions={[
+                        { label: "Publication Timeline", data: yearData, filename: `${profile.name}_timeline`, description: "Publications per year" },
+                        { label: "Recent Publications", data: sourceStats.recent_publications, filename: `${profile.name}_recent_pubs`, description: "List of papers" },
+                        {
+                            label: "Research Topics",
+                            data: sourceStats.top_keywords ? Object.entries(sourceStats.top_keywords).map(([k, v]) => ({ keyword: k, count: v })) : [],
+                            filename: `${profile.name}_keywords`,
+                            description: "Topic frequency"
+                        },
+                        {
+                            label: "Collaborators",
+                            data: sourceStats.top_collaborators ? Object.entries(sourceStats.top_collaborators).map(([k, v]) => ({ name: k, count: v })) : [],
+                            filename: `${profile.name}_collaborators`,
+                            description: "Top co-authors"
+                        },
+                    ]}
+                />
+            </div>
+
+            {/* Visualizations - Wait I need to keep the code flow correct */}
 
             {/* Visualizations */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
@@ -198,20 +345,36 @@ export default function Dashboard() {
 
             {/* Keywords Cloud & Recent Pubs & Collaborators & Venues */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
-                {/* Keywords */}
+                {/* Keywords Bar Chart */}
                 {sourceStats.top_keywords && Object.keys(sourceStats.top_keywords).length > 0 && (
                     <div className="lg:col-span-1 glass-card p-6 bg-white">
-                        <h3 className="text-lg font-bold text-slate-700 mb-4">Research Topics</h3>
-                        <div className="flex flex-wrap gap-2">
-                            {Object.entries(sourceStats.top_keywords).map(([keyword, count], i) => (
-                                <span
-                                    key={i}
-                                    className="bg-blue-50 text-blue-700 px-2 py-1 rounded text-xs border border-blue-100"
-                                    style={{ fontSize: Math.min(12 + count * 0.5, 16) }}
+                        <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+                            <Layers className="w-5 h-5 text-indigo-500" /> Research Topics
+                        </h3>
+                        <div className="h-[400px]">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <BarChart
+                                    data={Object.entries(sourceStats.top_keywords)
+                                        .map(([name, value]) => ({ name, value }))
+                                        .sort((a, b) => b.value - a.value)
+                                        .slice(0, 10)}
+                                    layout="vertical"
+                                    margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
                                 >
-                                    {keyword}
-                                </span>
-                            ))}
+                                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f0f0f0" />
+                                    <XAxis type="number" stroke="#9ca3af" tick={{ fontSize: 10 }} />
+                                    <YAxis
+                                        type="category"
+                                        dataKey="name"
+                                        width={140}
+                                        tick={{ fontSize: 11 }}
+                                        stroke="#64748b"
+                                        tickFormatter={(value) => value.length > 20 ? `${value.substring(0, 20)}...` : value}
+                                    />
+                                    <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                                    <Bar dataKey="value" name="Occurrences" fill="#8b5cf6" radius={[0, 4, 4, 0]} barSize={20} />
+                                </BarChart>
+                            </ResponsiveContainer>
                         </div>
                     </div>
                 )}
@@ -235,34 +398,47 @@ export default function Dashboard() {
 
             {/* Venues & Recent Pubs */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
-                {/* Venues */}
+                {/* Venues Bar Chart */}
                 <div className="glass-card p-6 bg-white">
                     <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
                         <Award className="w-5 h-5 text-purple-500" /> Top Venues & Journals
                     </h3>
-                    <div className="space-y-3">
-                        {(sourceStats.top_venues || sourceStats.top_journals) &&
-                            Object.entries(sourceStats.top_venues || sourceStats.top_journals || {})
-                                .sort((a, b) => b[1] - a[1]) // Sort desc
-                                .slice(0, 8)
-                                .map(([name, count], i) => (
-                                    <div key={i} className="flex gap-3 items-center">
-                                        <div className="w-6 h-6 rounded-full bg-purple-50 flex items-center justify-center text-purple-600 font-bold text-xs shrink-0">
-                                            {i + 1}
-                                        </div>
-                                        <div className="flex-1 text-sm text-slate-700 font-medium truncate" title={name}>{name}</div>
-                                        <div className="text-sm text-slate-500 font-mono bg-slate-100 px-2 rounded">{count}</div>
-                                    </div>
-                                ))}
-                        {(!sourceStats.top_venues && !sourceStats.top_journals) && (
-                            <div className="text-slate-400 italic">No venue info available.</div>
+                    <div className="h-[400px]">
+                        {(sourceStats.top_venues || sourceStats.top_journals) ? (
+                            <ResponsiveContainer width="100%" height="100%">
+                                <BarChart
+                                    data={Object.entries(sourceStats.top_venues || sourceStats.top_journals || {})
+                                        .map(([name, value]) => ({ name, value }))
+                                        .sort((a, b) => b.value - a.value)
+                                        .slice(0, 10)}
+                                    layout="vertical"
+                                    margin={{ top: 5, right: 30, left: 20, bottom: 5 }}
+                                >
+                                    <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#f0f0f0" />
+                                    <XAxis type="number" stroke="#9ca3af" tick={{ fontSize: 10 }} />
+                                    <YAxis
+                                        type="category"
+                                        dataKey="name"
+                                        width={140}
+                                        tick={{ fontSize: 11 }}
+                                        stroke="#64748b"
+                                        tickFormatter={(value) => value.length > 20 ? `${value.substring(0, 20)}...` : value}
+                                    />
+                                    <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                                    <Bar dataKey="value" name="Publications" fill="#d946ef" radius={[0, 4, 4, 0]} barSize={20} />
+                                </BarChart>
+                            </ResponsiveContainer>
+                        ) : (
+                            <div className="text-slate-400 italic h-full flex items-center justify-center">No venue info available.</div>
                         )}
                     </div>
                 </div>
 
                 {/* Recent Pubs */}
                 <div className="glass-card p-6 bg-white">
-                    <h3 className="text-lg font-bold text-slate-700 mb-4">Latest Publications</h3>
+                    <h3 className="text-lg font-bold text-slate-700 mb-4 flex items-center gap-2">
+                        <Calendar className="w-5 h-5 text-blue-500" /> Latest Publications
+                    </h3>
                     <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
                         {sourceStats.recent_publications?.map((pub, i) => (
                             <div key={i} className="flex gap-4 items-start p-3 bg-slate-50 rounded-lg border border-slate-100 hover:border-blue-200 transition">
