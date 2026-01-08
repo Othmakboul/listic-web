@@ -1,7 +1,7 @@
 import { useRef, useState, useEffect, useCallback } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import api from '../lib/api';
-import { Search } from 'lucide-react';
+import { Search, Download } from 'lucide-react';
 
 export default function NetworkGraph() {
     const fgRef = useRef();
@@ -15,15 +15,69 @@ export default function NetworkGraph() {
     const [expandedNodes, setExpandedNodes] = useState(new Set());
     const [info, setInfo] = useState("Click on the LISTIC node to start.");
     const [researcherCache, setResearcherCache] = useState({}); // Cache for researcher details
+    const [searchQuery, setSearchQuery] = useState('');
+    const [highlightedNodeId, setHighlightedNodeId] = useState(null);
+    const [showSearchResults, setShowSearchResults] = useState(false);
+
+    // Filter nodes based on search query
+    const searchResults = searchQuery.trim()
+        ? graphData.nodes.filter(n =>
+            n.name.toLowerCase().includes(searchQuery.toLowerCase())
+        ).slice(0, 10)
+        : [];
+
+    // Function to zoom to a specific node
+    const zoomToNode = (node) => {
+        if (fgRef.current && node.x !== undefined && node.y !== undefined) {
+            fgRef.current.centerAt(node.x, node.y, 500);
+            fgRef.current.zoom(2, 500);
+            setHighlightedNodeId(node.id);
+            setShowSearchResults(false);
+            setInfo(`Navigué vers: ${node.name}`);
+            // Clear highlight after 3 seconds
+            setTimeout(() => setHighlightedNodeId(null), 3000);
+        }
+    };
+
+    // Function to export graph data as JSON
+    const exportGraphData = () => {
+        // Create clean export data (remove internal properties like fx, fy)
+        const exportData = {
+            nodes: graphData.nodes.map(n => ({
+                id: n.id,
+                name: n.name,
+                type: n.type,
+                color: n.color,
+                ...(n.data ? { data: n.data } : {})
+            })),
+            links: graphData.links.map(l => ({
+                source: l.source.id || l.source,
+                target: l.target.id || l.target
+            })),
+            exportDate: new Date().toISOString(),
+            totalNodes: graphData.nodes.length,
+            totalLinks: graphData.links.length
+        };
+
+        const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `network-graph-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        setInfo(`Graphe exporté: ${graphData.nodes.length} nœuds, ${graphData.links.length} liens.`);
+    };
 
     useEffect(() => {
         if (fgRef.current) {
-            // Increase repulsion significantly to separate sibling nodes
-            fgRef.current.d3Force('charge').strength(-1500);
-            fgRef.current.d3Force('link').distance(100);
-            fgRef.current.d3Force('collide', fgRef.current.d3Force('collide') || undefined); // Ensure collide might be active if needed, but charge usually handles it.
+            // Strong repulsion to prevent overlap
+            fgRef.current.d3Force('charge').strength(-4000).distanceMax(1500);
+            fgRef.current.d3Force('link').distance(150);
         }
-    }, [graphData]); // Re-run when graph data changes to ensure forces apply new nodes
+    }, [graphData]);
 
     // Helper to add nodes safely
     // ... (keeping existing code, but ensure we don't duplicate lines around) ...
@@ -47,7 +101,7 @@ export default function NetworkGraph() {
     };
 
     // Helper to remove a node and all its descendants
-    const removeNodeAndDescendants = (nodeId) => {
+    const removeNodeAndDescendants = useCallback((nodeId) => {
         setGraphData(prev => {
             // Find all descendants using BFS
             const toRemove = new Set([nodeId]);
@@ -66,6 +120,14 @@ export default function NetworkGraph() {
             // Don't remove the clicked node itself, only its children
             toRemove.delete(nodeId);
 
+            // Also remove these descendants from expandedNodes
+            setExpandedNodes(prevExpanded => {
+                const newSet = new Set(prevExpanded);
+                toRemove.forEach(id => newSet.delete(id));
+                newSet.delete(nodeId); // Also mark the clicked node as collapsed
+                return newSet;
+            });
+
             return {
                 nodes: prev.nodes.filter(n => !toRemove.has(n.id)),
                 links: prev.links.filter(l => {
@@ -75,16 +137,7 @@ export default function NetworkGraph() {
                 })
             };
         });
-
-        // Remove all descendants from expandedNodes set as well
-        setExpandedNodes(prev => {
-            const newSet = new Set(prev);
-            // We need to find all children that were removed.
-            // For simplicity, just remove the node itself from expanded.
-            newSet.delete(nodeId);
-            return newSet;
-        });
-    };
+    }, []);
 
     const handleNodeClick = useCallback(async (node) => {
         // Toggle: If already expanded, collapse (remove children)
@@ -109,40 +162,28 @@ export default function NetworkGraph() {
             return;
         }
 
-        // 2. Global Projects Expansion
+        // 2. Global Projects Expansion -> Show 3 sub-categories
         if (type === 'group_projects_global') {
             setLoading(true);
             try {
                 const res = await api.get('/projects');
                 const projects = res.data;
 
-                // Group by type (Nationaux, Internationaux...)
-                const types = [...new Set(projects.map(p => p.type || 'Autres'))];
+                // Cache all projects for later use
+                setResearcherCache(prev => ({ ...prev, allProjects: projects }));
 
-                const newNodes = types.map(t => ({
-                    id: `proj-type-${t}`,
-                    name: t,
-                    val: 10,
-                    color: '#10b981', // Emerald
-                    type: 'project_category',
-                    raw_type: t
-                }));
+                // Create 3 sub-nodes: Collaborateurs HAL, Partenaires, Financeurs
+                const newNodes = [
+                    { id: 'proj-collaborators-hal', name: 'Collaborateurs (HAL)', val: 12, color: '#ec4899', type: 'proj_collab_hal' },
+                    { id: 'proj-partners', name: 'Partenaires', val: 12, color: '#f59e0b', type: 'proj_partners_group' },
+                    { id: 'proj-funders', name: 'Financeurs', val: 12, color: '#8b5cf6', type: 'proj_funders_group' },
+                    { id: 'proj-by-category', name: 'Par Catégorie', val: 12, color: '#10b981', type: 'proj_by_category' }
+                ];
 
                 const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
                 addNodesAndLinks(id, newNodes, newLinks);
 
-                // Cache projects
-                const cacheUpdate = {};
-                projects.forEach(p => {
-                    const t = p.type || 'Autres';
-                    if (!cacheUpdate[t]) cacheUpdate[t] = [];
-                    cacheUpdate[t].push(p);
-                });
-
-                // Merge into researcherCache (reusing this state for generic caching)
-                setResearcherCache(prev => ({ ...prev, ...cacheUpdate }));
-
-                setInfo("Expanded Projects. Choose a category.");
+                setInfo("Choisissez: Collaborateurs HAL, Partenaires, Financeurs ou Par Catégorie.");
             } catch (e) {
                 console.error(e);
                 setInfo("Error loading projects.");
@@ -152,22 +193,376 @@ export default function NetworkGraph() {
             return;
         }
 
-        // 2.5 Project Category Expansion
+        // 2.1 Projects by Category (original behavior)
+        if (type === 'proj_by_category') {
+            const projects = researcherCache.allProjects || [];
+            const types = [...new Set(projects.map(p => p.type || 'Autres'))];
+
+            const newNodes = types.map(t => ({
+                id: `proj-type-${t}`,
+                name: t,
+                val: 10,
+                color: '#10b981',
+                type: 'project_category',
+                raw_type: t
+            }));
+
+            // Cache projects by type
+            const cacheUpdate = {};
+            projects.forEach(p => {
+                const t = p.type || 'Autres';
+                if (!cacheUpdate[t]) cacheUpdate[t] = [];
+                cacheUpdate[t].push(p);
+            });
+            setResearcherCache(prev => ({ ...prev, ...cacheUpdate }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo("Choisissez une catégorie de projet.");
+            return;
+        }
+
+        // 2.2 Partners Group -> List all unique partners
+        if (type === 'proj_partners_group') {
+            const projects = researcherCache.allProjects || [];
+            const partnerMap = {}; // partner name -> list of projects
+
+            projects.forEach(p => {
+                const partnersStr = p.PARTENAIRES || '';
+                if (!partnersStr.trim()) return;
+                const partners = partnersStr.split(',').map(s => s.trim()).filter(s => s);
+                partners.forEach(partner => {
+                    if (!partnerMap[partner]) partnerMap[partner] = [];
+                    partnerMap[partner].push(p);
+                });
+            });
+
+            // Cache partner -> projects
+            setResearcherCache(prev => ({ ...prev, partnerProjects: partnerMap }));
+
+            const newNodes = Object.keys(partnerMap).slice(0, 30).map(partner => ({
+                id: `partner-${partner.replace(/\s+/g, '_')}`,
+                name: partner,
+                val: 6,
+                color: '#fbbf24',
+                type: 'item_partner',
+                partnerName: partner
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${Object.keys(partnerMap).length} partenaires trouvés.`);
+            return;
+        }
+
+        // 2.3 Partner item -> Show projects for this partner
+        if (type === 'item_partner') {
+            const partnerName = node.partnerName;
+            const projects = (researcherCache.partnerProjects || {})[partnerName] || [];
+
+            const newNodes = projects.map(p => ({
+                id: `partner-proj-${p._unique_id}`,
+                name: p.NOM,
+                val: 5,
+                color: '#fcd34d',
+                type: 'item_project_leaf',
+                data: p
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${projects.length} projets avec ${partnerName}.`);
+            return;
+        }
+
+        // 2.4 Funders Group -> List all unique funders
+        if (type === 'proj_funders_group') {
+            const projects = researcherCache.allProjects || [];
+            const funderMap = {}; // funder name -> list of projects
+
+            projects.forEach(p => {
+                const fundersStr = p.FINANCEURS || '';
+                if (!fundersStr.trim()) return;
+                // Funders might have complex names with dashes, split carefully
+                const funders = fundersStr.split(',').map(s => s.trim()).filter(s => s);
+                funders.forEach(funder => {
+                    if (!funderMap[funder]) funderMap[funder] = [];
+                    funderMap[funder].push(p);
+                });
+            });
+
+            // Cache funder -> projects
+            setResearcherCache(prev => ({ ...prev, funderProjects: funderMap }));
+
+            const newNodes = Object.keys(funderMap).map(funder => ({
+                id: `funder-${funder.replace(/\s+/g, '_')}`,
+                name: funder,
+                val: 6,
+                color: '#a78bfa',
+                type: 'item_funder',
+                funderName: funder
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${Object.keys(funderMap).length} financeurs trouvés.`);
+            return;
+        }
+
+        // 2.5 Funder item -> Show projects funded by this funder
+        if (type === 'item_funder') {
+            const funderName = node.funderName;
+            const projects = (researcherCache.funderProjects || {})[funderName] || [];
+
+            const newNodes = projects.map(p => ({
+                id: `funder-proj-${p._unique_id}`,
+                name: p.NOM,
+                val: 5,
+                color: '#c4b5fd',
+                type: 'item_project_leaf',
+                data: p
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${projects.length} projets financés par ${funderName}.`);
+            return;
+        }
+
+        // 2.6 Collaborators from HAL (global for LISTIC)
+        if (type === 'proj_collab_hal') {
+            setLoading(true);
+            setInfo("Chargement des collaborateurs depuis HAL...");
+            try {
+                // Fetch global stats from HAL for LISTIC
+                const halUrl = `https://api.archives-ouvertes.fr/search/?q=structAcronym_s:"LISTIC"&wt=json&rows=0&facet=true&facet.field=authFullName_s&facet.limit=50&facet.mincount=5`;
+                const response = await fetch(halUrl);
+                const data = await response.json();
+
+                const authorFacet = data.facet_counts?.facet_fields?.authFullName_s || [];
+                const collaborators = [];
+                for (let i = 0; i < authorFacet.length; i += 2) {
+                    collaborators.push({ name: authorFacet[i], count: authorFacet[i + 1] });
+                }
+
+                const newNodes = collaborators.slice(0, 30).map(c => ({
+                    id: `hal-collab-${c.name.replace(/\s+/g, '_')}`,
+                    name: c.name,
+                    val: 5,
+                    color: '#f9a8d4',
+                    type: 'item_collab',
+                    collabName: c.name
+                }));
+
+                const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+                addNodesAndLinks(id, newNodes, newLinks);
+                setInfo(`${collaborators.length} collaborateurs HAL trouvés.`);
+            } catch (e) {
+                console.error(e);
+                setInfo("Erreur de chargement HAL.");
+            } finally {
+                setLoading(false);
+            }
+            return;
+        }
+
+        // 2.5 Project Category Expansion -> Show 4 sub-options for this category
         if (type === 'project_category') {
             const catProjects = researcherCache[node.raw_type] || [];
+            const categoryName = node.raw_type;
+
+            // Cache the projects for this specific category
+            setResearcherCache(prev => ({ ...prev, [`cat-projects-${categoryName}`]: catProjects }));
+
+            // Create 4 sub-nodes for this category
+            const newNodes = [
+                { id: `cat-${categoryName}-collab-hal`, name: 'Collaborateurs (HAL)', val: 8, color: '#ec4899', type: 'cat_collab_hal', categoryName },
+                { id: `cat-${categoryName}-partners`, name: 'Partenaires', val: 8, color: '#f59e0b', type: 'cat_partners', categoryName },
+                { id: `cat-${categoryName}-funders`, name: 'Financeurs', val: 8, color: '#8b5cf6', type: 'cat_funders', categoryName },
+                { id: `cat-${categoryName}-projects-list`, name: 'Liste des Projets', val: 8, color: '#34d399', type: 'cat_projects_list', categoryName }
+            ];
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`Catégorie ${name}: Choisissez une vue.`);
+            return;
+        }
+
+        // 2.5.1 Category -> Projects List
+        if (type === 'cat_projects_list') {
+            const catProjects = researcherCache[`cat-projects-${node.categoryName}`] || [];
 
             const newNodes = catProjects.map(p => ({
                 id: p._unique_id || `proj-${p.NOM}`,
                 name: p.NOM,
-                val: 8,
-                color: '#34d399', // Lighter emerald
+                val: 6,
+                color: '#34d399',
                 type: 'item_project_global',
                 data: p
             }));
 
             const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
             addNodesAndLinks(id, newNodes, newLinks);
-            setInfo(`Showing ${name} projects.`);
+            setInfo(`${catProjects.length} projets ${node.categoryName}.`);
+            return;
+        }
+
+        // 2.5.2 Category -> Partners for this category
+        if (type === 'cat_partners') {
+            const catProjects = researcherCache[`cat-projects-${node.categoryName}`] || [];
+            const partnerMap = {};
+
+            catProjects.forEach(p => {
+                const partnersStr = p.PARTENAIRES || '';
+                if (!partnersStr.trim()) return;
+                const partners = partnersStr.split(',').map(s => s.trim()).filter(s => s);
+                partners.forEach(partner => {
+                    if (!partnerMap[partner]) partnerMap[partner] = [];
+                    partnerMap[partner].push(p);
+                });
+            });
+
+            setResearcherCache(prev => ({ ...prev, [`cat-partner-projects-${node.categoryName}`]: partnerMap }));
+
+            const newNodes = Object.keys(partnerMap).map(partner => ({
+                id: `cat-partner-${node.categoryName}-${partner.replace(/\s+/g, '_')}`,
+                name: partner,
+                val: 5,
+                color: '#fbbf24',
+                type: 'cat_item_partner',
+                partnerName: partner,
+                categoryName: node.categoryName
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${Object.keys(partnerMap).length} partenaires pour ${node.categoryName}.`);
+            return;
+        }
+
+        // 2.5.3 Category Partner item -> Show projects for this partner in this category
+        if (type === 'cat_item_partner') {
+            const partnerMap = researcherCache[`cat-partner-projects-${node.categoryName}`] || {};
+            const projects = partnerMap[node.partnerName] || [];
+
+            const newNodes = projects.map(p => ({
+                id: `cat-partner-proj-${node.categoryName}-${p._unique_id}`,
+                name: p.NOM,
+                val: 4,
+                color: '#fcd34d',
+                type: 'item_project_leaf',
+                data: p
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${projects.length} projets avec ${node.partnerName}.`);
+            return;
+        }
+
+        // 2.5.4 Category -> Funders for this category
+        if (type === 'cat_funders') {
+            const catProjects = researcherCache[`cat-projects-${node.categoryName}`] || [];
+            const funderMap = {};
+
+            catProjects.forEach(p => {
+                const fundersStr = p.FINANCEURS || '';
+                if (!fundersStr.trim()) return;
+                const funders = fundersStr.split(',').map(s => s.trim()).filter(s => s);
+                funders.forEach(funder => {
+                    if (!funderMap[funder]) funderMap[funder] = [];
+                    funderMap[funder].push(p);
+                });
+            });
+
+            setResearcherCache(prev => ({ ...prev, [`cat-funder-projects-${node.categoryName}`]: funderMap }));
+
+            const newNodes = Object.keys(funderMap).map(funder => ({
+                id: `cat-funder-${node.categoryName}-${funder.replace(/\s+/g, '_')}`,
+                name: funder,
+                val: 5,
+                color: '#a78bfa',
+                type: 'cat_item_funder',
+                funderName: funder,
+                categoryName: node.categoryName
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${Object.keys(funderMap).length} financeurs pour ${node.categoryName}.`);
+            return;
+        }
+
+        // 2.5.5 Category Funder item -> Show projects funded by this funder in this category
+        if (type === 'cat_item_funder') {
+            const funderMap = researcherCache[`cat-funder-projects-${node.categoryName}`] || {};
+            const projects = funderMap[node.funderName] || [];
+
+            const newNodes = projects.map(p => ({
+                id: `cat-funder-proj-${node.categoryName}-${p._unique_id}`,
+                name: p.NOM,
+                val: 4,
+                color: '#c4b5fd',
+                type: 'item_project_leaf',
+                data: p
+            }));
+
+            const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+            addNodesAndLinks(id, newNodes, newLinks);
+            setInfo(`${projects.length} projets financés par ${node.funderName}.`);
+            return;
+        }
+
+        // 2.5.6 Category -> Collaborators from HAL for the projects in this category
+        if (type === 'cat_collab_hal') {
+            const catProjects = researcherCache[`cat-projects-${node.categoryName}`] || [];
+
+            if (catProjects.length === 0) {
+                setInfo("Aucun projet dans cette catégorie.");
+                return;
+            }
+
+            setLoading(true);
+            setInfo("Chargement des collaborateurs depuis HAL...");
+
+            try {
+                // Search HAL for publications mentioning these project names
+                const projectNames = catProjects.map(p => p.NOM).join('" OR "');
+                const halUrl = `https://api.archives-ouvertes.fr/search/?q=text:("${encodeURIComponent(projectNames)}")&wt=json&rows=0&facet=true&facet.field=authFullName_s&facet.limit=30&facet.mincount=1`;
+
+                const response = await fetch(halUrl);
+                const data = await response.json();
+
+                const authorFacet = data.facet_counts?.facet_fields?.authFullName_s || [];
+                const collaborators = [];
+                for (let i = 0; i < authorFacet.length; i += 2) {
+                    collaborators.push({ name: authorFacet[i], count: authorFacet[i + 1] });
+                }
+
+                if (collaborators.length === 0) {
+                    setInfo("Aucun collaborateur HAL trouvé pour ces projets.");
+                    setLoading(false);
+                    return;
+                }
+
+                const newNodes = collaborators.map(c => ({
+                    id: `cat-hal-collab-${node.categoryName}-${c.name.replace(/\s+/g, '_')}`,
+                    name: c.name,
+                    val: 4,
+                    color: '#f9a8d4',
+                    type: 'item_collab',
+                    collabName: c.name
+                }));
+
+                const newLinks = newNodes.map(n => ({ source: id, target: n.id }));
+                addNodesAndLinks(id, newNodes, newLinks);
+                setInfo(`${collaborators.length} collaborateurs HAL trouvés.`);
+            } catch (e) {
+                console.error(e);
+                setInfo("Erreur de chargement HAL.");
+            } finally {
+                setLoading(false);
+            }
             return;
         }
 
@@ -447,7 +842,7 @@ export default function NetworkGraph() {
             return;
         }
 
-    }, [expandedNodes, researcherCache]);
+    }, [expandedNodes, researcherCache, removeNodeAndDescendants]);
 
     return (
         <div className="h-[calc(100vh-100px)] relative overflow-hidden bg-slate-900 mx-4 rounded-3xl shadow-2xl border border-slate-800">
@@ -461,6 +856,79 @@ export default function NetworkGraph() {
                 </div>
             </div>
 
+            {/* Search Bar */}
+            <div className="absolute top-4 right-4 z-20">
+                <div className="relative">
+                    <div className="flex items-center bg-slate-800 border border-slate-700 rounded-lg overflow-hidden shadow-lg">
+                        <Search className="w-4 h-4 text-slate-400 ml-3" />
+                        <input
+                            type="text"
+                            placeholder="Rechercher un nœud..."
+                            value={searchQuery}
+                            onChange={(e) => {
+                                setSearchQuery(e.target.value);
+                                setShowSearchResults(true);
+                            }}
+                            onFocus={() => setShowSearchResults(true)}
+                            onBlur={() => setTimeout(() => setShowSearchResults(false), 200)}
+                            className="bg-transparent text-white text-sm px-3 py-2 w-64 outline-none placeholder-slate-500"
+                        />
+                        {searchQuery && (
+                            <button
+                                onClick={() => {
+                                    setSearchQuery('');
+                                    setShowSearchResults(false);
+                                }}
+                                className="text-slate-400 hover:text-white px-2"
+                            >
+                                ✕
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Search Results Dropdown */}
+                    {showSearchResults && searchResults.length > 0 && (
+                        <div className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl max-h-64 overflow-y-auto">
+                            {searchResults.map((node, idx) => (
+                                <button
+                                    key={node.id}
+                                    onClick={() => zoomToNode(node)}
+                                    className="w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 hover:text-white transition-colors flex items-center gap-2 border-b border-slate-700 last:border-b-0"
+                                >
+                                    <span
+                                        className="w-3 h-3 rounded-full flex-shrink-0"
+                                        style={{ backgroundColor: node.color }}
+                                    />
+                                    <span className="truncate">{node.name}</span>
+                                    <span className="text-xs text-slate-500 ml-auto">{node.type}</span>
+                                </button>
+                            ))}
+                        </div>
+                    )}
+
+                    {showSearchResults && searchQuery && searchResults.length === 0 && (
+                        <div className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-3 text-center text-slate-500 text-sm">
+                            Aucun nœud trouvé
+                        </div>
+                    )}
+                </div>
+
+                {/* Node count and export button */}
+                <div className="mt-2 flex items-center justify-between gap-2">
+                    <span className="text-xs text-slate-500">
+                        {graphData.nodes.length} nœud{graphData.nodes.length > 1 ? 's' : ''}
+                    </span>
+                    <button
+                        onClick={exportGraphData}
+                        className="flex items-center gap-1 px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-slate-300 hover:text-white rounded transition-colors"
+                        title="Exporter le graphe en JSON"
+                    >
+                        <Download className="w-3 h-3" />
+                        Exporter
+                    </button>
+                </div>
+            </div>
+
             <ForceGraph2D
                 ref={fgRef}
                 graphData={graphData}
@@ -471,45 +939,75 @@ export default function NetworkGraph() {
                 onNodeClick={handleNodeClick}
                 backgroundColor="#0f172a"
 
-                // DAG Layout (Left to Right)
+                // DAG Layout (Left to Right) - Ensures forward expansion
                 dagMode="lr"
                 dagLevelDistance={350}
 
-                // Reduce movement/swimming
-                d3AlphaDecay={0.1}
-                d3VelocityDecay={0.3}
-                cooldownTicks={100}
-                // Auto zoom removed
+                // PHYSICS TUNING:
+                // 1. High VelocityDecay = High Friction (moves like in honey, stops floating)
+                // 2. High AlphaDecay = Simulation ends quickly
+                d3AlphaDecay={0.2}
+                d3VelocityDecay={0.8}
 
+                // Pre-calculate layout before rendering to avoid "flying" nodes
+                warmupTicks={100}
+                cooldownTicks={0} // Stop calculating once stable
+
+                // Zoom limits
+                minZoom={0.3}
+                maxZoom={4}
+
+                // Fix node position after drag
                 onNodeDragEnd={node => {
                     node.fx = node.x;
                     node.fy = node.y;
                 }}
+
+                // Freeze simulation after initial layout
+                onEngineStop={() => {
+                    // Fix all nodes in place after simulation stops
+                    if (fgRef.current) {
+                        graphData.nodes.forEach(node => {
+                            if (node.x !== undefined && node.y !== undefined) {
+                                node.fx = node.x;
+                                node.fy = node.y;
+                            }
+                        });
+                    }
+                }}
                 nodeCanvasObject={(node, ctx, globalScale) => {
                     const label = node.name;
-                    const fontSize = 12 / globalScale;
+
+                    // Use FIXED sizes in graph coordinates (not screen pixels)
+                    // This prevents nodes from overlapping when zooming
+                    const baseWidth = 140;
+                    const baseHeight = 40;
+                    const baseFontSize = 12;
+                    const baseRadius = 6;
+
+                    // Scale font for readability but keep node size fixed
+                    const fontSize = Math.max(baseFontSize, baseFontSize / Math.sqrt(globalScale));
                     ctx.font = `600 ${fontSize}px "Segoe UI", Roboto, Helvetica, Arial, sans-serif`;
 
-                    // Fixed Dimensions (Uniform Size)
-                    // We divide by globalScale to keep them constant physical size on screen, 
-                    // or we can define them in graph units. 
-                    // Let's keep them constant screen size (approx 120px wide) basically like UI elements
-                    const width = 140 / globalScale;
-                    const height = 40 / globalScale;
-                    const radius = 6 / globalScale;
+                    const width = baseWidth;
+                    const height = baseHeight;
+                    const radius = baseRadius;
 
                     const x = node.x - width / 2;
                     const y = node.y - height / 2;
 
-                    // Glowing Shadow
-                    ctx.shadowColor = node.color;
-                    ctx.shadowBlur = 15;
+                    // Check if this node is highlighted (from search)
+                    const isHighlighted = node.id === highlightedNodeId;
+
+                    // Glowing Shadow (stronger if highlighted)
+                    ctx.shadowColor = isHighlighted ? '#ffffff' : node.color;
+                    ctx.shadowBlur = isHighlighted ? 30 : 15;
                     ctx.shadowOffsetX = 0;
                     ctx.shadowOffsetY = 0;
 
                     // Draw Rounded Rectangle
                     ctx.fillStyle = node.color;
-                    ctx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+                    ctx.strokeStyle = isHighlighted ? '#ffffff' : 'rgba(255, 255, 255, 0.9)';
                     ctx.lineWidth = 1 / globalScale; // Thinner elegant border
 
                     ctx.beginPath();
@@ -535,7 +1033,7 @@ export default function NetworkGraph() {
 
                     // Truncation Logic
                     let displayLabel = label;
-                    const maxWidth = width - (16 / globalScale); // Padding
+                    const maxWidth = width - 16; // Fixed padding
                     if (ctx.measureText(displayLabel).width > maxWidth) {
                         while (ctx.measureText(displayLabel + '...').width > maxWidth && displayLabel.length > 0) {
                             displayLabel = displayLabel.slice(0, -1);

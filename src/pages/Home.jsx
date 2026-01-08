@@ -80,7 +80,7 @@ export default function Home() {
                                         {r.email && (
                                             <div className="flex items-center space-x-2">
                                                 <Mail className="w-4 h-4" />
-                                                <span className="truncate">{r.email.replace(/ -@- | –@– | @ /g, '@')}</span>
+                                                <span className="truncate">{r.email.replace(/ -@- | @ | @ /g, '@')}</span>
                                             </div>
                                         )}
                                         {r.phone && (

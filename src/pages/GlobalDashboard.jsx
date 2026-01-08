@@ -34,8 +34,7 @@ const DOC_TYPE_MAPPING = {
     'ISSUE': 'Special Issue',
     'BLOG': 'Blog Post',
     'NOTICE': 'Encyclopedia Entry',
-    'TRAD': 'Translation',
-    'UNDEFINED': 'Other'
+    'TRAD': 'Translation'
 };
 
 const LANG_MAPPING = {
@@ -100,10 +99,12 @@ function GlobalDashboard() {
         name: DOC_TYPE_MAPPING[t.name] || t.name
     }));
 
+    const totalLangs = (data.languages || []).reduce((acc, curr) => acc + curr.value, 0);
+
     const mappedLangs = (data.languages || []).map(l => ({
         ...l,
         name: LANG_MAPPING[l.name] || l.name.toUpperCase()
-    }));
+    })).filter(l => l.value > 0 && (totalLangs > 0 ? (l.value / totalLangs) >= 0.01 : true));
 
     return (
         <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -281,9 +282,10 @@ function GlobalDashboard() {
                                         fill="#06b6d4"
                                         label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
                                     >
-                                        {mappedLangs.map((entry, index) => (
-                                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
-                                        ))}
+                                        {mappedLangs
+                                            .map((entry, index) => (
+                                                <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                                            ))}
                                     </Pie>
                                     <Tooltip />
                                 </PieChart>
